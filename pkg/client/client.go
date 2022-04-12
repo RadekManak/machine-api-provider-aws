@@ -23,6 +23,8 @@ import (
 	"io/ioutil"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/openshift/machine-api-provider-aws/pkg/version"
 	corev1 "k8s.io/api/core/v1"
@@ -62,6 +64,8 @@ const (
 	kubeCloudConfigName = "kube-cloud-config"
 	// cloudCABundleKey is the key in the kube cloud config ConfigMap where the custom CA bundle is located
 	cloudCABundleKey = "ca-bundle.pem"
+	// awsRegionsCacheExpirationDuration is the duration for which the AWS regions cache is valid
+	awsRegionsCacheExpirationDuration = time.Minute * 30
 )
 
 // AwsClientBuilderFuncType is function type for building aws client
@@ -205,6 +209,80 @@ func NewClientFromKeys(accessKey, secretAccessKey, region string) (Client, error
 	}, nil
 }
 
+type describeRegionsData struct {
+	err                   error
+	describeRegionsOutput *ec2.DescribeRegionsOutput
+	lastUpdated           time.Time
+}
+
+// Do not access directly, use cachedAWSDescribeRegions() instead.
+var regionsCacheMap map[string]*describeRegionsData
+var cacheLock sync.Mutex
+
+// cachedDescribeRegions returns full list of regions from AWS.
+// DescribeRegionsOutput is cached to avoid AWS API calls on each reconcile loop.
+func cachedAWSDescribeRegions(awsSession *session.Session) (*ec2.DescribeRegionsOutput, error) {
+	cacheLock.Lock()
+	defer cacheLock.Unlock()
+	if regionsCacheMap == nil {
+		regionsCacheMap = make(map[string]*describeRegionsData)
+	}
+	creds, err := awsSession.Config.Credentials.Get()
+	if err != nil {
+		return nil, err
+	}
+	accessKeyID := creds.AccessKeyID
+	regionsCache, found := regionsCacheMap[accessKeyID]
+	if !found {
+		regionsCache = &describeRegionsData{}
+		regionsCacheMap[accessKeyID] = regionsCache
+	}
+
+	if regionsCache.describeRegionsOutput != nil && regionsCache.err == nil &&
+		time.Since(regionsCache.lastUpdated) < awsRegionsCacheExpirationDuration {
+		klog.Info("Using cached AWS region data")
+		return regionsCache.describeRegionsOutput, regionsCache.err
+	}
+
+	currentRegion := awsSession.Config.Region
+	// Use known endpoint to send our request
+	awsSession.Config.Region = aws.String("us-east-1")
+	describeRegionsOutput, err := ec2.New(awsSession).DescribeRegions(&ec2.DescribeRegionsInput{
+		AllRegions: aws.Bool(true),
+		DryRun:     aws.Bool(false),
+	})
+	// Restore the original region
+	awsSession.Config.Region = currentRegion
+	if err != nil {
+		regionsCache.err = err
+		return nil, err
+	}
+
+	regionsCache.describeRegionsOutput = describeRegionsOutput
+	regionsCache.lastUpdated = time.Now()
+	return describeRegionsOutput, nil
+}
+
+// Check that region is in the DescribeRegions list and is opted in.
+func validateRegion(describeRegionsOutput *ec2.DescribeRegionsOutput, region string) (*ec2.Region, error) {
+	var regionData *ec2.Region
+	for _, currentRegion := range describeRegionsOutput.Regions {
+		if *currentRegion.RegionName == region {
+			regionData = currentRegion
+			break
+		}
+	}
+
+	if regionData == nil {
+		return nil, fmt.Errorf("region %s is not a valid region", region)
+	}
+	if *regionData.OptInStatus == "not-opted-in" {
+		return nil, fmt.Errorf("region %s is not opted in", region)
+	}
+	klog.Info("AWS reports region ", region, " is valid")
+	return regionData, nil
+}
+
 // NewValidatedClient creates our client wrapper object for the actual AWS clients we use.
 // This should behave the same as NewClient except it will validate the client configuration
 // (eg the region) before returning the client.
@@ -215,11 +293,35 @@ func NewValidatedClient(ctrlRuntimeClient client.Client, secretName, namespace, 
 	}
 
 	// Check that the endpoint can be resolved by the endpoint resolver.
+	// If the endpoint is not resolvable locally, we try to validate using the AWS API.
 	// If the endpoint is not known, it is not a standard or configured custom region.
 	// If this is the case, the client will likely not be able to connect
 	_, err = s.Config.EndpointResolver.EndpointFor("ec2", region, func(opts *endpoints.Options) {
 		opts.StrictMatching = true
 	})
+	if err != nil {
+		switch err.(type) {
+		case endpoints.UnknownEndpointError:
+			// Check again without strict matching to make sure region passes regex check
+			_, err = s.Config.EndpointResolver.EndpointFor("ec2", region, func(o *endpoints.Options) {
+				o.StrictMatching = false
+			})
+			if err != nil {
+				return nil, fmt.Errorf("invalid region %s: %v", region, err)
+			}
+
+			klog.Info("Region ", region, " is not recognized by aws-sdk, trying to validate using API")
+			describeRegionsOutput, err := cachedAWSDescribeRegions(s)
+			if err != nil {
+				return nil, fmt.Errorf("error validating region %s against AWS: %v", region, err)
+			}
+
+			_, err = validateRegion(describeRegionsOutput, region)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("region %q not resolved: %w", region, err)
 	}
