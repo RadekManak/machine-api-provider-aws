@@ -3,7 +3,7 @@ module github.com/openshift/machine-api-provider-aws
 go 1.18
 
 require (
-	github.com/aws/aws-sdk-go v1.43.20
+	github.com/aws/aws-sdk-go v1.38.23
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/go-logr/logr v1.2.2
 	github.com/golang/mock v1.5.0
