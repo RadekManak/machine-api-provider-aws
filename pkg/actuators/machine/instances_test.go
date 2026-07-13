@@ -1594,6 +1594,48 @@ func TestGetInstanceMetadataOptionsRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "http protocol ipv6 enabled",
+			providerConfig: &machinev1beta1.AWSMachineProviderConfig{
+				MetadataServiceOptions: machinev1beta1.MetadataServiceOptions{
+					HTTPProtocolIPv6: ptr.To(machinev1beta1.HTTPProtocolIPv6Enabled),
+				},
+			},
+			expected: &ec2.InstanceMetadataOptionsRequest{
+				HttpProtocolIpv6: aws.String(ec2.InstanceMetadataProtocolStateEnabled),
+			},
+		},
+		{
+			name: "http protocol ipv6 disabled",
+			providerConfig: &machinev1beta1.AWSMachineProviderConfig{
+				MetadataServiceOptions: machinev1beta1.MetadataServiceOptions{
+					HTTPProtocolIPv6: ptr.To(machinev1beta1.HTTPProtocolIPv6Disabled),
+				},
+			},
+			expected: &ec2.InstanceMetadataOptionsRequest{
+				HttpProtocolIpv6: aws.String(ec2.InstanceMetadataProtocolStateDisabled),
+			},
+		},
+		{
+			name: "explicit http protocol ipv6 disabled overrides dual-stack default",
+			providerConfig: &machinev1beta1.AWSMachineProviderConfig{
+				MetadataServiceOptions: machinev1beta1.MetadataServiceOptions{
+					HTTPProtocolIPv6: ptr.To(machinev1beta1.HTTPProtocolIPv6Disabled),
+				},
+			},
+			infra: &configv1.Infrastructure{
+				Status: configv1.InfrastructureStatus{
+					PlatformStatus: &configv1.PlatformStatus{
+						AWS: &configv1.AWSPlatformStatus{
+							IPFamily: configv1.DualStackIPv6Primary,
+						},
+					},
+				},
+			},
+			expected: &ec2.InstanceMetadataOptionsRequest{
+				HttpProtocolIpv6: aws.String(ec2.InstanceMetadataProtocolStateDisabled),
+			},
+		},
+		{
 			name: "http put response hop limit set to 1",
 			providerConfig: &machinev1beta1.AWSMachineProviderConfig{
 				MetadataServiceOptions: machinev1beta1.MetadataServiceOptions{
@@ -1643,6 +1685,7 @@ func TestGetInstanceMetadataOptionsRequest(t *testing.T) {
 				MetadataServiceOptions: machinev1beta1.MetadataServiceOptions{
 					Authentication:          machinev1beta1.MetadataServiceAuthenticationRequired,
 					HTTPEndpoint:            ptr.To(machinev1beta1.HTTPEndpointEnabled),
+					HTTPProtocolIPv6:        ptr.To(machinev1beta1.HTTPProtocolIPv6Enabled),
 					HTTPPutResponseHopLimit: aws.Int64(32),
 					InstanceMetadataTags:    ptr.To(machinev1beta1.InstanceMetadataTagsEnabled),
 				},
@@ -1650,6 +1693,7 @@ func TestGetInstanceMetadataOptionsRequest(t *testing.T) {
 			expected: &ec2.InstanceMetadataOptionsRequest{
 				HttpTokens:              aws.String(ec2.HttpTokensStateRequired),
 				HttpEndpoint:            aws.String(ec2.InstanceMetadataEndpointStateEnabled),
+				HttpProtocolIpv6:        aws.String(ec2.InstanceMetadataProtocolStateEnabled),
 				HttpPutResponseHopLimit: aws.Int64(32),
 				InstanceMetadataTags:    aws.String(ec2.InstanceMetadataTagsStateEnabled),
 			},
